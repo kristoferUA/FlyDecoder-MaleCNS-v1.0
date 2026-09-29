@@ -29,7 +29,7 @@ def _sha256(path: Path) -> str:
 
 def _fetch(url: str, destination: Path, expected: str) -> None:
     if destination.exists() and _sha256(destination) == expected:
-        print(f"Вже перевірено: {destination.name}")
+        print(f"Already verified: {destination.name}")
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
     part = destination.with_name(destination.name + ".part")
@@ -60,23 +60,23 @@ def _fetch(url: str, destination: Path, expected: str) -> None:
                     reported = received // (100 << 20)
                     print(f"  {destination.name}: {received / 1e6:,.0f} MB", flush=True)
     if not part.exists() or _sha256(part) != expected:
-        raise RuntimeError(f"SHA-256 не збігається: {destination.name}; файл залишено як .part")
+        raise RuntimeError(f"SHA-256 mismatch: {destination.name}; partial file kept as .part")
     os.replace(part, destination)
-    print(f"Завантажено й перевірено: {destination.name}")
+    print(f"Downloaded and verified: {destination.name}")
 
 
 def fetch_required(data_dir: str | Path | None = None) -> list[Path]:
     if not MANIFEST.exists():
-        raise FileNotFoundError(f"Не знайдено upstream маніфест: {MANIFEST}")
+        raise FileNotFoundError(f"Upstream manifest not found: {MANIFEST}")
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     files = manifest["malecns"]["files"]
     selected = [item for item in files if item["path"] in REQUIRED_FILES]
     found = {item["path"] for item in selected}
     if found != REQUIRED_FILES:
-        raise RuntimeError(f"upstream маніфест не містить потрібних файлів: {sorted(REQUIRED_FILES - found)}")
+        raise RuntimeError(f"upstream manifest is missing required files: {sorted(REQUIRED_FILES - found)}")
     target = Path(data_dir or os.environ.get("FLYBRAIN_DATA", ROOT / "data" / "malecns"))
     target.mkdir(parents=True, exist_ok=True)
-    print(f"Офіційні файли MaleCNS v1.0 · CC BY 4.0 → {target}", flush=True)
+    print(f"Official MaleCNS v1.0 files · CC BY 4.0 → {target}", flush=True)
     for item in selected:
         _fetch(item["url"], target / item["path"], item["sha256"])
     return [target / name for name in sorted(REQUIRED_FILES)]
@@ -86,7 +86,7 @@ def main() -> int:
     try:
         fetch_required()
     except Exception as exc:
-        print(f"Помилка отримання MaleCNS: {exc}", file=sys.stderr)
+        print(f"MaleCNS download failed: {exc}", file=sys.stderr)
         return 1
     return 0
 

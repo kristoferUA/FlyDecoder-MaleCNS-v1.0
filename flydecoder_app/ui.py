@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pygame
 
-from .brain_adapter import ACTIVITY_NAMES, FlyBrainAdapter
+from .brain_adapter import ACTIVITY_NAMES, DOWNSTREAM_CHANNELS, OPTIC_BANDS, FlyBrainAdapter
 from .features import extract_features
 from .generator import examples
 from .readout import ACTIONS, ActivityReadout
@@ -59,17 +59,13 @@ def _fit_text(font, value, max_width, suffix="…"):
     return value + suffix if value else suffix
 
 
-def _fit_suffix(font, value, max_width):
-    """Show the end of long encoded rows, where the distinguishing bytes often are."""
-    value = str(value)
-    while value and font.size(value)[0] > max_width:
-        value = value[1:]
-    return value
-
-
 def _bar(surface, x, y, width, value, color, height=4):
     _rect(surface, PALETTE["outline"], (x, y, width, height))
     _rect(surface, color, (x, y, max(1, int(width * max(0.0, min(1.0, float(value))))), height))
+
+def _blend(low, high, value):
+    value = max(0.0, min(1.0, float(value)))
+    return tuple(round(a + (b - a) * value) for a, b in zip(low, high))
 
 
 class DecoderWindow:
@@ -80,6 +76,7 @@ class DecoderWindow:
         self.display = pygame.display.set_mode(DISPLAY)
         pygame.display.set_caption("FlyDecoder · MaleCNS v1.0")
         pygame.key.start_text_input()
+        pygame.key.set_repeat(400, 35)
         try:
             pygame.scrap.init()
         except pygame.error:
@@ -103,15 +100,16 @@ class DecoderWindow:
         self.running = True
         self.cancel = threading.Event()
         self.input_text = demo_text
+        self.cursor_pos = len(self.input_text)
         self.input_active = True
-        self.feature_page = 0
+        self.feature_scroll = 0
+        self._caret_position = None
         self.feature = extract_features(self.input_text)
         self.activity = None
         self.result = None
         self.metrics = None
         self.training = None
-        self.activity_page = 0
-        self.status = "Завантаження симуляції та MaleCNS…"
+        self.status = "Loading the simulation and MaleCNS…"
         self.action_state = "idle"
         self.action_started = time.time()
         self.last_coffee = time.time() + 16.0
@@ -134,7 +132,7 @@ class DecoderWindow:
                 model = ActivityReadout(len(ACTIVITY_NAMES), seed=17)
             self.messages.put(("ready", adapter, model))
         except Exception as exc:
-            self.messages.put(("error", f"Не вдалося завантажити мозок: {exc}"))
+            self.messages.put(("error", f"Could not load the brain: {exc}"))
 
     def _begin_decode(self):
         if not self.ready or self.busy or not self.input_text.strip():
@@ -144,7 +142,7 @@ class DecoderWindow:
         self.result = None
         self.metrics = None
         self.busy = True
-        self.status = "Муха нахиляється й аналізує рядок…"
+        self.status = "The fly leans in to analyze the string…"
         self._set_state("analyze")
 
         def task():
@@ -155,7 +153,7 @@ class DecoderWindow:
                 result = decode_with_retry(text, activity, self.model)
                 self.messages.put(("decoded", activity, result))
             except Exception as exc:
-                self.messages.put(("error", f"Помилка симуляції: {exc}"))
+                self.messages.put(("error", f"Simulation error: {exc}"))
 
         self._start_worker(task)
 
@@ -164,7 +162,7 @@ class DecoderWindow:
             return
         self.busy = True
         self.training = None
-        self.status = "Навчання: муха обирає, оцінювач винагороджує точні байти…"
+        self.status = "Training: the fly chooses; the rewarder scores exact bytes…"
         self._set_state("type")
 
         def update(progress: TrainingProgress):
@@ -176,7 +174,7 @@ class DecoderWindow:
                                        save_path=self.model_path, progress=update, cancel=self.cancel)
                 self.messages.put(("trained", result))
             except Exception as exc:
-                self.messages.put(("error", f"Помилка навчання: {exc}"))
+                self.messages.put(("error", f"Training error: {exc}"))
 
         self._start_worker(task)
 
@@ -185,7 +183,7 @@ class DecoderWindow:
             return
         self.busy = True
         self.metrics = None
-        self.status = "Сліпа перевірка на нових рядках…"
+        self.status = "Blind evaluation on new strings…"
         self._set_state("analyze")
 
         def task():
@@ -193,7 +191,7 @@ class DecoderWindow:
                 metrics = run_blind_evaluation(self.adapter, self.model, count=count, seed=8041)
                 self.messages.put(("blind", metrics))
             except Exception as exc:
-                self.messages.put(("error", f"Помилка сліпої перевірки: {exc}"))
+                self.messages.put(("error", f"Blind evaluation error: {exc}"))
 
         self._start_worker(task)
 
@@ -212,7 +210,7 @@ class DecoderWindow:
                 self.adapter, self.model = message[1], message[2]
                 self.ready = True
                 self.busy = False
-                self.status = f"Готово · CPU · ваг зчитувача: {self.model.updates}"
+                self.status = f"Ready · CPU · readout weights: {self.model.updates}"
             elif kind == "decoded":
                 self.activity, self.result = message[1], message[2]
                 self.busy = False
@@ -224,77 +222,135 @@ class DecoderWindow:
                     self._set_state("failure")
             elif kind == "train_progress":
                 self.training = message[1]
-                self.status = (f"Навчання {self.training.completed}/{self.training.total} · "
-                               f"точність винагороди {self.training.recent_accuracy:.0%}")
+                self.status = (f"Training {self.training.completed}/{self.training.total} · "
+                               f"reward accuracy {self.training.recent_accuracy:.0%}")
             elif kind == "trained":
                 self.training = message[1]
                 self.busy = False
-                self.status = f"Навчання збережено · {self.model.updates} рішень"
+                self.status = f"Training saved · {self.model.updates} decisions"
                 self._set_state("success")
             elif kind == "blind":
                 self.metrics = message[1]
                 self.busy = False
-                self.status = (f"Сліпа перевірка · перша спроба {self.metrics['top1_accuracy']:.0%}, "
-                               f"з повторами {self.metrics['retry_accuracy']:.0%}")
+                self.status = (f"Blind evaluation · first try {self.metrics['top1_accuracy']:.0%}, "
+                               f"with retries {self.metrics['retry_accuracy']:.0%}")
                 self._set_state("select")
             elif kind == "error":
                 self.status = message[1]
                 self.busy = False
                 self._set_state("failure")
 
+    def _input_view(self, max_width=476):
+        """Return the visible text and caret offset in display pixels."""
+        text = self.input_text
+        cursor = max(0, min(self.cursor_pos, len(text)))
+        display_font = self.display_fonts[id(self.font)]
+        max_pixel_width = max_width * SCALE
+        start = cursor
+        while start > 0 and display_font.size(text[start - 1:cursor])[0] <= max_pixel_width - 8 * SCALE:
+            start -= 1
+        end = cursor
+        while end < len(text) and display_font.size(text[start:end + 1])[0] <= max_pixel_width:
+            end += 1
+        return start, end, text[start:end], display_font.size(text[start:cursor])[0]
+
+    def _insert_input_text(self, value):
+        room = max(0, 12000 - len(self.input_text))
+        inserted = str(value)[:room]
+        if not inserted:
+            return
+        self.input_text = (self.input_text[:self.cursor_pos] + inserted +
+                           self.input_text[self.cursor_pos:])
+        self.cursor_pos += len(inserted)
+        self.feature = extract_features(self.input_text)
+
+    def _delete_before_cursor(self):
+        if self.cursor_pos <= 0:
+            return
+        self.input_text = (self.input_text[:self.cursor_pos - 1] +
+                           self.input_text[self.cursor_pos:])
+        self.cursor_pos -= 1
+        self.feature = extract_features(self.input_text)
+
+    def _place_input_cursor(self, x):
+        start, end, _shown, _offset = self._input_view()
+        display_font = self.display_fonts[id(self.font)]
+        target_x = max(0, (x - 14) * SCALE)
+        choices = range(start, end + 1)
+        self.cursor_pos = min(
+            choices,
+            key=lambda index: abs(display_font.size(self.input_text[start:index])[0] - target_x),
+        )
+
     def _events(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
             elif event.type == pygame.TEXTINPUT and self.input_active and not self.busy:
-                self.input_text = (self.input_text + event.text)[-12000:]
-                self.feature = extract_features(self.input_text)
+                self._insert_input_text(event.text)
+            elif event.type == pygame.MOUSEWHEEL:
+                mouse_x, mouse_y = pygame.mouse.get_pos()
+                x, y = mouse_x // SCALE, mouse_y // SCALE
+                if 8 <= x < 266 and 293 <= y < 384:
+                    max_scroll = max(0, len(self.feature.names) - 5)
+                    self.feature_scroll = max(0, min(max_scroll, self.feature_scroll - int(event.y)))
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     self.running = False
                 elif event.key == pygame.K_RETURN and not (event.mod & pygame.KMOD_SHIFT):
                     self._begin_decode()
-                elif event.key == pygame.K_BACKSPACE and not self.busy:
-                    self.input_text = self.input_text[:-1]
-                    self.feature = extract_features(self.input_text)
+                elif event.key == pygame.K_BACKSPACE and self.input_active and not self.busy:
+                    self._delete_before_cursor()
+                elif event.key == pygame.K_DELETE and self.input_active and not self.busy:
+                    if self.cursor_pos < len(self.input_text):
+                        self.cursor_pos += 1
+                        self._delete_before_cursor()
+                elif event.key == pygame.K_LEFT and self.input_active and not self.busy:
+                    self.cursor_pos = max(0, self.cursor_pos - 1)
+                elif event.key == pygame.K_RIGHT and self.input_active and not self.busy:
+                    self.cursor_pos = min(len(self.input_text), self.cursor_pos + 1)
+                elif event.key == pygame.K_HOME and self.input_active and not self.busy:
+                    self.cursor_pos = 0
+                elif event.key == pygame.K_END and self.input_active and not self.busy:
+                    self.cursor_pos = len(self.input_text)
                 elif event.key == pygame.K_v and event.mod & pygame.KMOD_CTRL and not self.busy:
                     try:
                         pasted = pygame.scrap.get(pygame.SCRAP_TEXT)
                         if pasted:
-                            self.input_text = (self.input_text + pasted.decode("utf-8", "replace").rstrip("\x00"))[-12000:]
-                            self.feature = extract_features(self.input_text)
+                            self._insert_input_text(pasted.decode("utf-8", "replace").rstrip("\x00"))
                     except (pygame.error, AttributeError):
                         pass
                 elif event.key in (pygame.K_PAGEUP, pygame.K_PAGEDOWN):
                     delta = 1 if event.key == pygame.K_PAGEDOWN else -1
-                    if event.mod & pygame.KMOD_SHIFT:
-                        self.activity_page = max(0, self.activity_page + delta)
-                    else:
-                        self.feature_page = max(0, self.feature_page + delta)
+                    max_scroll = max(0, len(self.feature.names) - 5)
+                    self.feature_scroll = max(0, min(max_scroll, self.feature_scroll + delta * 5))
                 elif event.key == pygame.K_TAB:
                     self.input_active = not self.input_active
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 x, y = event.pos[0] // SCALE, event.pos[1] // SCALE
                 if 178 <= y < 205:
                     self.input_active = True
-                elif 209 <= y < 232:
-                    if x < 105:
-                        self._begin_decode()
-                    elif x < 207:
-                        self._begin_training()
-                    elif x < 339:
-                        self._begin_blind()
-                    elif x < 431 and not self.busy:
-                        self.input_text = ""
-                        self.feature = extract_features("")
-                        self.result = None
-                        self.input_active = True
-                elif 291 <= y < 384 and x < 266:
-                    self.feature_page += 1
-                elif 291 <= y < 384 and x >= 272:
-                    self.activity_page += 1
+                    self._place_input_cursor(x)
+                else:
+                    self.input_active = False
+                    if 209 <= y < 232:
+                        if x < 105:
+                            self._begin_decode()
+                        elif x < 207:
+                            self._begin_training()
+                        elif x < 339:
+                            self._begin_blind()
+                        elif x < 431 and not self.busy:
+                            self.input_text = ""
+                            self.cursor_pos = 0
+                            self.feature = extract_features("")
+                            self.result = None
+                            self.input_active = True
         if self.input_active:
-            pygame.key.set_text_input_rect(pygame.Rect(18 * SCALE, 182 * SCALE, 482 * SCALE, 20 * SCALE))
+            _start, _end, _shown, caret_offset = self._input_view()
+            caret_x = 14 * SCALE + caret_offset
+            pygame.key.set_text_input_rect(
+                pygame.Rect(caret_x, 181 * SCALE, 3 * SCALE, 20 * SCALE))
 
     def _scene(self):
         s = self.canvas
@@ -342,11 +398,11 @@ class DecoderWindow:
         fly = pygame.Surface((76, 64), pygame.SRCALPHA)
         center_x, center_y = 31 + lean, 32 + bounce
         wing_color = (161, 194, 183, 185)
-        pygame.draw.ellipse(fly, wing_color, (13 + lean // 3, 8, 25, 13))
-        pygame.draw.ellipse(fly, (148, 181, 171, 175), (28 + lean // 3, 4, 25, 14))
-        pygame.draw.line(fly, (222, 231, 210, 220), (18, 18), (34, 12), 1)
-        pygame.draw.line(fly, (222, 231, 210, 220), (34, 17), (45, 10), 1)
-
+        # Lower the wings so their bases overlap the thorax instead of floating above it.
+        pygame.draw.ellipse(fly, wing_color, (13 + lean // 3, 11, 25, 13))
+        pygame.draw.ellipse(fly, (148, 181, 171, 175), (28 + lean // 3, 8, 25, 14))
+        pygame.draw.line(fly, (222, 231, 210, 220), (18, 21), (34, 14), 1)
+        pygame.draw.line(fly, (222, 231, 210, 220), (34, 21), (45, 14), 1)
         # Three visible body sections give the insect a clear head, thorax, and abdomen.
         pygame.draw.ellipse(fly, p["outline"], (7, center_y - 5, 25, 14))
         pygame.draw.ellipse(fly, (76, 58, 48), (10, center_y - 3, 20, 10))
@@ -394,13 +450,18 @@ class DecoderWindow:
         _text(s, self.bold, _fit_text(self.bold, self.status, 352), 9, 151,
               p["mint"] if self.ready else p["gold"])
         _text(s, self.small, "CPU · MaleCNS CC BY 4.0", 374, 152, p["muted"])
-        _text(s, self.bold, "РЯДОК ДЛЯ ДЕКОДУВАННЯ", 9, 165)
+        _text(s, self.bold, "TEXT TO DECODE", 9, 165)
         field_color = p["green"] if self.input_active else p["panel2"]
         _rect(s, p["outline"], (8, 178, 504, 27)); _rect(s, field_color, (9, 179, 502, 25))
-        shown = _fit_suffix(self.font, self.input_text, 476)
-        _text(s, self.font, shown or "Введіть або вставте рядок…", 14, 184, p["ink"])
-        buttons = ((8, 209, 96, "ДЕКОДУВАТИ"), (109, 209, 96, "НАВЧАТИ"),
-                   (210, 209, 125, "СЛІПА ПЕРЕВІРКА"), (340, 209, 88, "ОЧИСТИТИ"))
+        _start, _end, shown, caret_offset = self._input_view()
+        if self.input_text:
+            _text(s, self.font, shown, 14, 184, p["ink"])
+        else:
+            _text(s, self.font, "Enter or paste a string…", 22, 184, p["muted"])
+        if self.input_active and pygame.time.get_ticks() % 1000 < 530:
+            self._caret_position = (14 * SCALE + caret_offset, 181 * SCALE, 200 * SCALE)
+        buttons = ((8, 209, 96, "DECODE"), (109, 209, 96, "TRAIN"),
+                   (210, 209, 125, "BLIND TEST"), (340, 209, 88, "CLEAR"))
         for idx, (x, y, w, label) in enumerate(buttons):
             bg = p["table_hi"] if idx == 0 else p["panel2"]
             if self.busy and idx < 3:
@@ -410,12 +471,12 @@ class DecoderWindow:
         if self.training:
             progress = self.training.completed / max(1, self.training.total)
             _bar(s, 435, 215, 77, progress, p["mint"], 5)
-            _text(s, self.small, f"{self.training.recent_accuracy:.0%} точн.", 435, 222, p["muted"])
+            _text(s, self.small, f"{self.training.recent_accuracy:.0%} correct", 435, 222, p["muted"])
         elif self.model:
-            _text(s, self.small, f"ваг {self.model.updates}", 444, 215, p["muted"])
+            _text(s, self.small, f"weights {self.model.updates}", 444, 215, p["muted"])
 
         _rect(s, p["panel"], (8, 235, 258, 53)); _rect(s, p["outline"], (8, 235, 258, 53), 1)
-        _text(s, self.bold, "РЕЗУЛЬТАТ", 14, 239, p["gold"])
+        _text(s, self.bold, "RESULT", 14, 239, p["gold"])
         if self.result and self.result.output is not None:
             try:
                 result_text = self.result.output.decode("utf-8", "strict")
@@ -424,16 +485,16 @@ class DecoderWindow:
             _text(s, self.font, _fit_text(self.font, result_text, 240), 14, 251, p["white"])
             first = self.result.first_action
             final = self.result.attempts[-1].action if self.result.attempts else first
-            _text(s, self.small, f"перший: {first}   обрано: {final}", 14, 267, p["mint"])
+            _text(s, self.small, f"first: {first}   selected: {final}", 14, 267, p["mint"])
         elif self.result:
             _text(s, self.font, _fit_text(self.font, self.result.message, 240), 14, 252, p["red"])
-            _text(s, self.small, f"спроб: {len(self.result.attempts)} · дія: {self.result.first_action}", 14, 269, p["muted"])
+            _text(s, self.small, f"attempts: {len(self.result.attempts)} · action: {self.result.first_action}", 14, 269, p["muted"])
         else:
-            _text(s, self.font, "Введіть рядок і натисніть Enter.", 14, 255, p["muted"])
-            _text(s, self.small, "Текст передається лише вибраному декодеру.", 14, 270, p["muted"])
+            _text(s, self.font, "Enter a string and press Enter.", 14, 255, p["muted"])
+            _text(s, self.small, "Input is sent only to the selected decoder.", 14, 270, p["muted"])
 
         _rect(s, p["panel"], (272, 235, 240, 53)); _rect(s, p["outline"], (272, 235, 240, 53), 1)
-        _text(s, self.bold, "ОЦІНКИ ДІЙ ЗЧИТУВАЧА", 278, 239, p["gold"])
+        _text(s, self.bold, "READOUT ACTION SCORES", 278, 239, p["gold"])
         probs = self.model.probabilities(self.activity) if self.model and self.activity is not None else [0.2] * 5
         colors = (p["gold"], p["pink"], p["mint"], p["blue"], p["muted"])
         for i, (name, score) in enumerate(zip(ACTIONS, probs)):
@@ -443,53 +504,111 @@ class DecoderWindow:
             _bar(s, x, y + 13, 64, float(score), colors[i], 4)
 
         _rect(s, p["panel"], (8, 293, 258, 91)); _rect(s, p["outline"], (8, 293, 258, 91), 1)
-        _text(s, self.bold, "ЧИСЛОВІ ОЗНАКИ", 14, 297, p["gold"])
+        _text(s, self.bold, "NUMERIC FEATURES", 14, 297, p["gold"])
         names, values = self.feature.names, self.feature.values
         page_size = 5
-        start = (self.feature_page * page_size) % len(names)
-        shown_indices = [(start + i) % len(names) for i in range(page_size)]
-        for row, index in enumerate(shown_indices):
+        max_scroll = max(0, len(names) - page_size)
+        start = max(0, min(max_scroll, self.feature_scroll))
+        self.feature_scroll = start
+        for row, index in enumerate(range(start, min(start + page_size, len(names)))):
             y = 310 + row * 12
             _text(s, self.small, _fit_text(self.small, names[index], 125), 14, y, p["cream"])
             _bar(s, 147, y + 4, 78, float(values[index]), p["blue"], 5)
             _text(s, self.small, f"{float(values[index]):.2f}", 231, y, p["muted"])
+        if max_scroll:
+            track_y, track_height = 310, 58
+            thumb_height = max(9, round(track_height * page_size / len(names)))
+            thumb_y = track_y + round((track_height - thumb_height) * start / max_scroll)
+            _rect(s, p["outline"], (257, track_y, 3, track_height))
+            _rect(s, p["mint"], (257, thumb_y, 3, thumb_height))
         _text(s, self.small, _fit_text(self.small,
-              f"{self.feature.summary['length']} символів · mod 4={self.feature.summary['mod4']} · mod 8={self.feature.summary['mod8']}", 244),
+              f"{self.feature.summary['length']} characters · mod 4={self.feature.summary['mod4']} · mod 8={self.feature.summary['mod8']}", 244),
               14, 370, p["muted"])
 
+        self._draw_activity_map()
+
+    def _draw_activity_map(self):
+        """Show actual simulator activity as retinotopic bands and a brain pathway map."""
+        s = self.canvas
+        p = PALETTE
         _rect(s, p["panel"], (272, 293, 240, 91)); _rect(s, p["outline"], (272, 293, 240, 91), 1)
-        activity_pages = max(1, (len(ACTIVITY_NAMES) + 4) // 5)
-        _text(s, self.bold, f"АКТИВНІ НЕЙРОННІ КАНАЛИ · {self.activity_page % activity_pages + 1}/{activity_pages}", 278, 297, p["gold"])
-        if self.activity is None:
-            activity = [0.0] * len(ACTIVITY_NAMES)
-        else:
-            activity = self.activity
-        activity_start = (self.activity_page % activity_pages) * 5
-        for slot, index in enumerate(range(activity_start, min(activity_start + 5, len(ACTIVITY_NAMES)))):
-            name, value = ACTIVITY_NAMES[index], activity[index]
-            y = 309 + slot * 12
-            if name.startswith("optic_band_"):
-                band = int(name.split("_")[2]) + 1
-                group = f"Смуга {band:02d}"
-            else:
-                prefix = name.rsplit("_", 1)[0]
-                group = {
-                    "visual_projection": "Проекція",
-                    "central": "Центр",
-                    "mushroom_body": "Грибне тіло",
-                    "descending": "Низхідні",
-                    "vnc": "VNC",
-                }[prefix]
-            metric = "активність" if name.endswith("_mean") else "клітини"
-            label = _fit_text(self.small, f"{group} · {metric}", 105)
-            _text(s, self.small, label, 278, y, p["cream"])
-            _bar(s, 390, y + 4, 112, float(value), p["mint"], 5)
-        _text(s, self.small, "Shift+PgDn — наступні канали", 278, 372, p["muted"])
+        _text(s, self.bold, "BRAIN MAP", 278, 297, p["gold"])
+        _rect(s, _blend(p["panel2"], p["mint"], 0.85), (374, 299, 6, 6))
+        _text(s, self.small, "signal", 383, 297, p["muted"])
+        pygame.draw.circle(s, p["mint"], (432, 302), 4, 1)
+        _text(s, self.small, "active cells", 440, 297, p["muted"])
+
+        activity = self.activity
+        if activity is None or len(activity) < len(ACTIVITY_NAMES):
+            activity = (0.0,) * len(ACTIVITY_NAMES)
+
+        def level(index):
+            return max(0.0, min(1.0, float(activity[index])))
+
+        def contrast(value):
+            # Downstream rates are small fractions of 100 Hz; compress the display scale only.
+            return value ** 0.25 if value > 0 else 0.0
+
+        # The 24 retinotopic bands keep their spatial order; each tile encodes both returned metrics.
+        tile_x, tile_y, tile_w, tile_gap = 279, 309, 8, 1
+        for band in range(OPTIC_BANDS):
+            mean_signal = level(2 * band)
+            active_cells = level(2 * band + 1)
+            x = tile_x + band * (tile_w + tile_gap)
+            _rect(s, p["outline"], (x, tile_y, tile_w, 10))
+            _rect(s, _blend(p["panel2"], p["mint"], mean_signal), (x + 1, tile_y + 1, tile_w - 2, 8))
+            active_width = round((tile_w - 2) * active_cells)
+            if active_width:
+                _rect(s, p["gold"], (x + 1, tile_y + 8, active_width, 1))
+        _text(s, self.small, "RETINA · VISUAL BANDS", 278, 321, p["muted"])
+
+        # These nodes follow the signal through the five downstream groups exposed by the adapter.
+        layout = (
+            ("visual_projection", "optic", 292, 347),
+            ("central", "central", 337, 347),
+            ("mushroom_body", "mushroom body", 382, 336),
+            ("descending", "descending", 444, 347),
+            ("vnc", "VNC", 490, 347),
+        )
+        offset = OPTIC_BANDS * 2
+        index_by_name = {name: index for index, name in enumerate(DOWNSTREAM_CHANNELS)}
+        metrics = {}
+        for name, label, x, y in layout:
+            index = offset + index_by_name[name] * 2
+            metrics[name] = (level(index), level(index + 1))
+
+        links = (
+            ("visual_projection", "central"),
+            ("central", "mushroom_body"),
+            ("central", "descending"),
+            ("mushroom_body", "descending"),
+            ("descending", "vnc"),
+        )
+        positions = {name: (x, y) for name, _label, x, y in layout}
+        for left, right in links:
+            a = positions[left]
+            b = positions[right]
+            signal = (contrast(metrics[left][0]) + contrast(metrics[right][0])) / 2.0
+            pygame.draw.line(s, _blend(p["panel2"], p["mint"], signal), a, b, 2)
+
+        for name, label, x, y in layout:
+            mean_signal, active_cells = metrics[name]
+            center = (x, y)
+            bounds = pygame.Rect(x - 7, y - 7, 14, 14)
+            pygame.draw.circle(s, p["outline"], center, 7)
+            pygame.draw.circle(s, _blend(p["panel2"], p["mint"], contrast(mean_signal)), center, 4)
+            pygame.draw.circle(s, p["muted"], center, 6, 1)
+            if active_cells > 0:
+                pygame.draw.arc(s, p["gold"], bounds, -math.pi / 2,
+                                -math.pi / 2 + math.tau * contrast(active_cells), 2)
+            label_width = self.small.size(label)[0]
+            _text(s, self.small, label, x - label_width // 2, 357, p["cream"])
 
     def _draw(self):
         global _TEXT_CANVAS, _TEXT_OVERLAYS
         overlays = []
         _TEXT_CANVAS, _TEXT_OVERLAYS = self.canvas, overlays
+        self._caret_position = None
         try:
             self._scene()
             self._draw_panel()
@@ -499,6 +618,9 @@ class DecoderWindow:
         for font, value, x, y, color in overlays:
             glyphs = self.display_fonts[id(font)].render(value, True, color)
             self.display.blit(glyphs, (x * SCALE, y * SCALE))
+        if self._caret_position is not None:
+            x, top, bottom = self._caret_position
+            pygame.draw.line(self.display, PALETTE["ink"], (x, top), (x, bottom), SCALE)
         pygame.display.flip()
 
     def _animation(self):

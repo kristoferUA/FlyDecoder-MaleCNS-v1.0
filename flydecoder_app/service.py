@@ -47,7 +47,7 @@ def decode_with_retry(
     codec_indices = sorted(range(4), key=lambda idx: float(scores[idx]), reverse=True)
     if first_action == "skip" and scores[4] - max(scores[:4]) >= 1.0:
         return InferenceResult(features, np.asarray(activity, dtype=np.float32), scores, probabilities,
-                               first_action, (), None, True, "муха вирішила пропустити цей рядок")
+                               first_action, (), None, True, "The fly decided to skip this string")
 
     attempts: list[Attempt] = []
     for idx in codec_indices:
@@ -60,12 +60,12 @@ def decode_with_retry(
         quality = assess_bytes(data, expected_pattern=expected_pattern)
         attempts.append(Attempt(action, data, quality, None))
         if quality.plausible:
-            message = "декодовано" if len(attempts) == 1 else f"успіх після повторного вибору: {action}"
+            message = "Decoded" if len(attempts) == 1 else f"Retry succeeded: {action}"
             return InferenceResult(features, np.asarray(activity, dtype=np.float32), scores, probabilities,
                                    first_action, tuple(attempts), data, False, message)
     return InferenceResult(features, np.asarray(activity, dtype=np.float32), scores, probabilities,
                            first_action, tuple(attempts), None, False,
-                           "усі варіанти відхилені; муха пропонує пропустити рядок")
+                           "All options were rejected; the fly suggests skipping this string")
 
 
 def training_reward(text: str, expected: bytes | None, action: str) -> float:

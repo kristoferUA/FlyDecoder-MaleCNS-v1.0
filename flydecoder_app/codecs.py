@@ -14,58 +14,58 @@ class DecodeError(ValueError):
 def decode_base64(text: str) -> bytes:
     compact = "".join(text.split())
     if not compact:
-        raise DecodeError("порожній рядок")
+        raise DecodeError("empty string")
     core = compact.rstrip("=")
     padding = len(compact) - len(core)
     if padding > 2 or "=" in core or not re.fullmatch(r"[A-Za-z0-9+/_-]*", core):
-        raise DecodeError("символи або padding не відповідають Base64")
+        raise DecodeError("characters or padding do not match Base64")
     remainder = len(core) % 4
     if remainder == 1:
-        raise DecodeError("довжина Base64 має зайвий символ")
+        raise DecodeError("Base64 has an invalid length remainder")
     needed = (-len(core)) % 4
     if padding and (len(compact) % 4 != 0 or padding != needed):
-        raise DecodeError("некоректний padding Base64")
+        raise DecodeError("invalid Base64 padding")
     padded = core + ("=" * needed if not padding else "=" * padding)
     try:
         return base64.b64decode(padded.encode("ascii"), altchars=b"-_", validate=True)
     except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
-        raise DecodeError("рядок не є коректним Base64") from exc
+        raise DecodeError("string is not valid Base64") from exc
 
 
 def decode_hex(text: str) -> bytes:
     compact = re.sub(r"[\s,:;|_-]+", "", text)
     if not compact:
-        raise DecodeError("порожній hex-рядок")
+        raise DecodeError("empty hex string")
     if len(compact) % 2:
-        raise DecodeError("у hex має бути парна кількість символів")
+        raise DecodeError("hex must contain an even number of characters")
     if not re.fullmatch(r"[0-9A-Fa-f]+", compact):
-        raise DecodeError("hex містить недопустимий символ")
+        raise DecodeError("hex contains an invalid character")
     try:
         return bytes.fromhex(compact)
     except ValueError as exc:
-        raise DecodeError("рядок не є коректним hex") from exc
+        raise DecodeError("string is not valid hex") from exc
 
 
 def decode_binary(text: str) -> bytes:
     compact = re.sub(r"[\s,:;|_]+", "", text)
     if not compact:
-        raise DecodeError("порожній binary-рядок")
+        raise DecodeError("empty binary string")
     if not re.fullmatch(r"[01]+", compact):
-        raise DecodeError("binary може містити лише 0 і 1 та роздільники")
+        raise DecodeError("binary can contain only 0, 1, and separators")
     if len(compact) % 8:
-        raise DecodeError("кількість бітів має ділитися на 8")
+        raise DecodeError("bit count must be divisible by 8")
     return bytes(int(compact[i : i + 8], 2) for i in range(0, len(compact), 8))
 
 
 def decode_url(text: str) -> bytes:
     if not text:
-        raise DecodeError("порожній URL-рядок")
+        raise DecodeError("empty URL string")
     valid = [match.group() for match in re.finditer(r"%[0-9A-Fa-f]{2}", text)]
     remainder = re.sub(r"%[0-9A-Fa-f]{2}", "", text)
     if "%" in remainder:
-        raise DecodeError("кожен знак % має бути частиною послідовності %HH")
+        raise DecodeError("each % must be part of a %HH sequence")
     if not valid and "+" not in text:
-        raise DecodeError("не знайдено URL escape-послідовностей")
+        raise DecodeError("no URL escape sequences found")
     return unquote_to_bytes(text.replace("+", " "))
 
 
@@ -81,5 +81,5 @@ def decode_bytes(text: str, action: str) -> bytes:
     try:
         decoder = DECODERS[action]
     except KeyError as exc:
-        raise DecodeError(f"невідомий декодер: {action}") from exc
+        raise DecodeError(f"unknown decoder: {action}") from exc
     return decoder(text)

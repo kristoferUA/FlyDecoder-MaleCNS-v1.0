@@ -26,39 +26,39 @@ def _engine(model_path: Path, fresh: bool = False):
     if model_path.exists() and not fresh:
         model = ActivityReadout.load(model_path)
         if model.input_count != len(ACTIVITY_NAMES):
-            print("Схема каналів змінилася; створюю новий зовнішній зчитувач.", flush=True)
+            print("Channel schema changed; creating a new external readout.", flush=True)
             model = ActivityReadout(len(ACTIVITY_NAMES), seed=17)
         else:
-            print(f"Завантажено ваги зчитувача: {model.updates} оновлень", flush=True)
+            print(f"Loaded readout weights: {model.updates} updates", flush=True)
     else:
         model = ActivityReadout(len(ACTIVITY_NAMES), seed=17)
-        print("Створено чисту модель зовнішнього зчитувача.", flush=True)
+        print("Created a fresh external readout model.", flush=True)
     return adapter, model
 
 
 def _print_blind(metrics: dict) -> None:
-    print(f"Сліпих прикладів: {metrics['count']}")
-    print(f"Точний перший вибір: {metrics['top1_accuracy']:.1%}")
-    print(f"Точне відновлення з повторами: {metrics['retry_accuracy']:.1%}")
-    print("Матриця помилок (рядок — формат прикладу, стовпець — перший вибір):")
+    print(f"Blind samples: {metrics['count']}")
+    print(f"Exact first choice: {metrics['top1_accuracy']:.1%}")
+    print(f"Exact recovery with retries: {metrics['retry_accuracy']:.1%}")
+    print("Confusion matrix (rows: sample format, columns: first choice):")
     actions = ("base64", "hex", "binary", "url", "skip")
     print("          " + " ".join(f"{action:>7}" for action in actions))
     for codec in actions:
         print(f"{codec:>9} " + " ".join(f"{metrics['confusion'][codec][action]:7d}" for action in actions))
     if metrics["failures"]:
-        print("Невдалі рішення:")
+        print("Failed cases:")
         for item in metrics["failures"]:
             print(f"  {item['expected']} → {item['first']}: {item['input']!r} ({item['result']})")
 
 
 def _parser():
-    parser = argparse.ArgumentParser(description="Локальний декодер рядків на симуляції FlyBrain / MaleCNS v1.0")
-    parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="файл зовнішніх ваг зчитувача")
-    parser.add_argument("--self-check", action="store_true", help="запустити один реальний прохід мозку й декодування")
-    parser.add_argument("--blind-eval", type=int, metavar="N", help="сліпо перевірити N нових прикладів")
-    parser.add_argument("--train", type=int, metavar="N", help="навчити зчитувач на N нових синтетичних прикладах")
-    parser.add_argument("--fresh", action="store_true", help="почати навчання з нульових зовнішніх ваг")
-    parser.add_argument("--ui-smoke", type=float, metavar="SECONDS", help="відкрити Pygame у прихованому режимі на тест")
+    parser = argparse.ArgumentParser(description="Local string decoder powered by the FlyBrain / MaleCNS v1.0 simulation")
+    parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="external readout weights file")
+    parser.add_argument("--self-check", action="store_true", help="run one brain simulation pass and decode a sample")
+    parser.add_argument("--blind-eval", type=int, metavar="N", help="blind-check N new samples")
+    parser.add_argument("--train", type=int, metavar="N", help="train the readout on N new synthetic samples")
+    parser.add_argument("--fresh", action="store_true", help="start training with zeroed external weights")
+    parser.add_argument("--ui-smoke", type=float, metavar="SECONDS", help="open Pygame in headless mode for a smoke check")
     return parser
 
 
@@ -79,31 +79,31 @@ def main(argv=None) -> int:
             activity = adapter.activity(features.values)
             result = decode_with_retry(sample, activity, model)
             nonzero = int((activity > 1e-6).sum())
-            print(f"Симуляція: {time.time() - started:.2f} с · {len(activity)} ознак активності, "
-                  f"{nonzero} ненульових")
-            print(f"Ознаки: {features.summary}")
-            print(f"Муха обрала: {result.first_action}; результат: {result.output!r}; {result.message}")
+            print(f"Simulation: {time.time() - started:.2f} s · {len(activity)} activity values, "
+                  f"{nonzero} nonzero")
+            print(f"Features: {features.summary}")
+            print(f"The fly chose: {result.first_action}; result: {result.output!r}; {result.message}")
         if args.train is not None:
             def report(progress):
                 if progress.completed % 5 == 0 or progress.completed == 1:
-                    print(f"Навчання {progress.completed}/{progress.total}: "
-                          f"{progress.recent_accuracy:.1%} правильних винагород за останні приклади", flush=True)
+                    print(f"Training {progress.completed}/{progress.total}: "
+                          f"{progress.recent_accuracy:.1%} correct rewards on recent samples", flush=True)
             result = train_readout(adapter, model, args.train, seed=9301,
                                    save_path=args.model, progress=report)
-            print(f"Ваги зчитувача збережено: {args.model} ({result.completed} прикладів)")
+            print(f"Readout weights saved: {args.model} ({result.completed} samples)")
         if args.blind_eval is not None:
             _print_blind(run_blind_evaluation(adapter, model, count=args.blind_eval))
         if args.ui_smoke is not None:
             os.environ["SDL_VIDEODRIVER"] = "dummy"
             from .ui import DecoderWindow
             window = DecoderWindow(args.model, headless=True, adapter=adapter, model=model)
-            window.status = "Перевірка Pygame UI на CPU"
+            window.status = "Checking the Pygame UI on CPU"
             window.run(max_seconds=args.ui_smoke)
-            print("Pygame-вікно відкрито й завершено в headless-режимі")
+            print("Pygame window opened and closed in headless mode")
         return 0
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
-        print(f"FlyDecoder не запустився: {exc}", file=sys.stderr)
-        print("Перевірте, що install_flydecoder.bat завершив завантаження MaleCNS та збір кешу.", file=sys.stderr)
+        print(f"FlyDecoder could not start: {exc}", file=sys.stderr)
+        print("Check that install_flydecoder.bat finished downloading MaleCNS and building the cache.", file=sys.stderr)
         return 1
 
 
